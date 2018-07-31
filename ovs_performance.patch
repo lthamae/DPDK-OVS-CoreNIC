@@ -1,0 +1,848 @@
+--- ovs_performance.py	2018-07-26 11:24:08.976869606 +0200
++++ ovs_performance_new1.py	2018-07-26 11:14:48.187062284 +0200
+@@ -88,7 +88,6 @@
+ #
+ import matplotlib
+ matplotlib.use('Agg')
+-
+ #
+ # Imports from natural sort
+ #
+@@ -99,15 +98,6 @@
+ #
+ from distutils.version import StrictVersion
+ 
+-# In Python 2, raw_input() returns a string, and input() tries
+-# to run the input as a Python expression.
+-# Since getting a string was almost always what we wanted,
+-# Python 3 does that with input()
+-# The following line checks the Python version being used to
+-# stick to raw_input() for Python2 and input() for Python3
+-if sys.version_info[0] == 3:
+-    raw_input = input
+-
+ 
+ #
+ # Default configuration
+@@ -237,10 +227,9 @@
+ # Run simple traffic test Physical to VM back to Physical
+ #
+ def test_p2v2p(nr_of_flows, packet_sizes):
+-
++    init = True
+     p2v2p_results = list()
+     cpu_results = list()
+-    warm_up_done = False
+ 
+     for packet_size in packet_sizes:
+ 
+@@ -251,11 +240,10 @@
+ 
+         ##################################################
+         lprint("  * Create OVS OpenFlow rules...")
+-
+-        create_ovs_bidirectional_of_rules(
+-            nr_of_flows,
+-            of_interfaces[config.physical_interface],
+-            of_interfaces[config.virtual_interface])
++        if init:
++            create_ovs_bidirectional_of_rules(nr_of_flows,
++                                          of_interfaces[config.physical_interface],
++                                          of_interfaces[config.virtual_interface])
+ 
+         ##################################################
+         lprint("  * Initializing packet generation...")
+@@ -274,17 +262,9 @@
+ 
+             tester.start_traffic(config.tester_interface)
+ 
+-            warm_up_done = warm_up_verify(nr_of_flows * 2,
+-                                          config.warm_up_timeout)
+-            tester.stop_traffic(config.tester_interface)
+-
+-            if not warm_up_done:
+-                if config.warm_up_no_fail:
++            warm_up_verify(nr_of_flows * 2, DEFAULT_WARM_UP_TIMEOUT)
+ 
+-                    stop_traffic_loop_on_vm(config.dut_vm_address)
+-                    flow_table_cool_down()
+-                else:
+-                    sys.exit(-1)
++            tester.stop_traffic(config.tester_interface)
+ 
+         ##################################################
+         lprint("  * Clear all statistics...")
+@@ -296,7 +276,7 @@
+             = get_of_port_packet_stats(of_interfaces[config.virtual_interface])
+ 
+         ##################################################
+-        if not config.warm_up or not warm_up_done:
++        if not config.warm_up:
+             lprint("  * Start packet receiver on VM...")
+             start_traffic_loop_on_vm(config.dut_vm_address,
+                                      config.dut_vm_nic_pci)
+@@ -392,6 +372,7 @@
+ 
+         ##################################################
+         lprint("  * Restoring state for next test...")
++        init = False
+         tester.unconfigure_traffic_stream(config.tester_interface)
+ 
+         # dut_shell.dut_exec('sh -c "ovs-ofctl del-flows {0} && ovs-appctl dpctl/del-flows"'.\
+@@ -414,7 +395,6 @@
+ 
+     return p2v2p_results, cpu_results
+ 
+-
+ #
+ # Run simple traffic test Physical to VM
+ #
+@@ -422,7 +402,6 @@
+ 
+     p2v_results = list()
+     cpu_results = list()
+-    warm_up_done = False
+ 
+     for packet_size in packet_sizes:
+ 
+@@ -449,13 +428,8 @@
+         if config.warm_up:
+             lprint("  * Doing flow table warm-up...")
+             tester.start_traffic(config.tester_interface)
+-            warm_up_done = warm_up_verify(nr_of_flows, config.warm_up_timeout)
++            warm_up_verify(nr_of_flows, DEFAULT_WARM_UP_TIMEOUT)
+             tester.stop_traffic(config.tester_interface)
+-            if not warm_up_done:
+-                if config.warm_up_no_fail:
+-                    flow_table_cool_down()
+-                else:
+-                    sys.exit(-1)
+ 
+         ##################################################
+         lprint("  * Clear all statistics...")
+@@ -560,7 +534,6 @@
+ 
+     p2p_results = list()
+     cpu_results = list()
+-    warm_up_done = False
+ 
+     for packet_size in packet_sizes:
+ 
+@@ -588,13 +561,8 @@
+         if config.warm_up:
+             lprint("  * Doing flow table warm-up...")
+             tester.start_traffic(config.tester_interface)
+-            warm_up_done = warm_up_verify(nr_of_flows, config.warm_up_timeout)
++            warm_up_verify(nr_of_flows, DEFAULT_WARM_UP_TIMEOUT)
+             tester.stop_traffic(config.tester_interface)
+-            if not warm_up_done:
+-                if config.warm_up_no_fail:
+-                    flow_table_cool_down()
+-                else:
+-                    sys.exit(-1)
+ 
+         ##################################################
+         lprint("  * Clear all statistics...")
+@@ -852,11 +820,11 @@
+ #
+ def get_active_datapath_flows():
+     if ovs_data_path == "netdev":
+-        cmd = 'sh -c "ovs-appctl dpctl/show netdev@ovs-netdev | ' \
+-              'grep flows | awk \'{print $2}\'"'
++        cmd = 'sh -c "ovs-appctl dpctl/dump-flows netdev@ovs-netdev | ' \
++              "grep -v 'flow-dump from pmd on cpu core:' | " \
++              'wc -l"'
+     else:
+-        cmd = 'sh -c "ovs-appctl dpctl/show system@ovs-system | ' \
+-              'grep flows | awk \'{print $2}\'"'
++        cmd = 'sh -c "ovs-appctl dpctl/dump-flows system@ovs-system | wc -l"'
+ 
+     result = dut_shell.dut_exec(cmd, die_on_error=True)
+     return int(result.stdout_output)
+@@ -874,41 +842,13 @@
+         if timeout != 0 and run_time >= timeout:
+             lprint("ERROR: Failed to complete warm-up in time ({} seconds)!".
+                    format(timeout))
+-            return False
++            sys.exit(-1)
+ 
+         time.sleep(1)
+         active_flows = get_active_datapath_flows()
+     #
+     # Flows exist, we can continue now
+     #
+-    return True
+-
+-
+-#
+-# Wait for datapth flows to flush
+-#
+-def flow_table_cool_down(failure_fatal=True):
+-    run_time = 0
+-    active_flows = 0
+-
+-    if config.warm_up or not config.no_cool_down:
+-        lprint("  * Doing flow table cool-down...")
+-        active_flows = get_active_datapath_flows()
+-
+-        while active_flows > 32:
+-            run_time += 1
+-            if run_time >= 20:
+-                if failure_fatal:
+-                    lprint("ERROR: Failed to complete cool-down in time "
+-                           "(20 seconds)!")
+-                    sys.exit(-1)
+-                else:
+-                    lprint("WARNING: Failed to complete cool-down in time "
+-                           "(20 seconds)!")
+-                    break
+-
+-            active_flows = get_active_datapath_flows()
+-            time.sleep(1)
+ 
+ 
+ #
+@@ -934,8 +874,21 @@
+ 
+     dut_shell.dut_exec(cmd, die_on_error=True)
+ 
+-    flow_table_cool_down(failure_fatal=False)
+-    time.sleep(2)
++    if config.warm_up or not config.no_cool_down:
++        lprint("  * Doing flow table cool-down...")
++        active_flows = get_active_datapath_flows()
++        run_time = 0
++
++        while active_flows > 32:
++            run_time += 1
++            if run_time >= 20:
++                lprint("WARNING: Failed to complete cool-down in time (20 seconds)!")
++                break
++
++            active_flows = get_active_datapath_flows()
++            time.sleep(1)
++
++        time.sleep(2)
+ 
+ 
+ #
+@@ -962,14 +915,13 @@
+           r" nohup sh -c " \
+           r' "(while sleep 1; do echo show port stats 0; done | ' \
+           r" testpmd -c {5:x} -n 4 --socket-mem 2048,0 -w {3} -- "\
+-          r" --burst 64 -i --rxq={4} --txq={4} --rxd={8} " \
+-          r" --txd={9} --auto-start --forward-mode=rxonly " \
++          r" --burst 64 -i --rxq={4} --txq={4} --rxd=4096 " \
++          r" --txd=1024 --auto-start --forward-mode=rxonly " \
+           r' --port-topology=chained --coremask={6:x}{7})" ' \
+           r" &>results.txt &'". \
+           format(vm, config.dut_vm_user, config.dut_vm_password, pci,
+                  config.dut_vm_nic_queues, cpu_mask, pmd_cpu_mask,
+-                 disable_hw_vlan, config.dut_vm_nic_rxd,
+-                 config.dut_vm_nic_txd)
++                 disable_hw_vlan)
+ 
+     dut_shell.dut_exec('', raw_cmd=['sh', '-c', cmd], die_on_error=True)
+     time.sleep(2)
+@@ -1005,14 +957,13 @@
+           r" nohup sh -c " \
+           r' "(while sleep 1; do echo show port stats 0; done | ' \
+           r" testpmd -c {5:x} -n 4 --socket-mem 2048,0 -w {3} -- "\
+-          r" --burst 64 -i --rxq={4} --txq={4} --rxd={9} " \
+-          r" --txd={10} --coremask={6:x} --auto-start " \
++          r" --burst 64 -i --rxq={4} --txq={4} --rxd=4096 " \
++          r" --txd=1024 --coremask={6:x} --auto-start " \
+           r' --port-topology=chained{7}{8})" ' \
+           r" &>results.txt &'". \
+           format(vm, config.dut_vm_user, config.dut_vm_password, pci,
+                  config.dut_vm_nic_queues, cpu_mask, pmd_cpu_mask,
+-                 mac_swap, disable_hw_vlan, config.dut_vm_nic_rxd,
+-                 config.dut_vm_nic_txd)
++                 mac_swap, disable_hw_vlan)
+ 
+     dut_shell.dut_exec('', raw_cmd=['sh', '-c', cmd], die_on_error=True)
+     time.sleep(2)
+@@ -1044,7 +995,7 @@
+ 
+     if skip_samples > 0:
+         pkt_rates = pkt_rates[skip_samples:]
+-
++        
+     if len(pkt_rates) <= 10:
+         lprint("ERROR: No engough elements to calculate packet rate!")
+         sys.exit(-1)
+@@ -1137,7 +1088,7 @@
+ #
+ def get_packets_per_second_from_traffic_generator_rx_stats(rx_stats):
+     avg = cnt = 0
+-    for timestamp in natsorted(list(rx_stats.keys()))[2:-2]:
++    for timestamp in natsorted(rx_stats.keys())[2:-2]:
+         stats = rx_stats[timestamp]
+         pps = stats['pr_total']['pps']
+         avg += pps
+@@ -1151,7 +1102,7 @@
+ #
+ def get_packets_per_second_from_traffic_generator_tx_stats(tx_stats):
+     avg = cnt = 0
+-    for timestamp in natsorted(list(tx_stats.keys()))[2:-2]:
++    for timestamp in natsorted(tx_stats.keys())[2:-2]:
+         stats = tx_stats[timestamp]
+         pps = stats['pt_total']['pps']
+         avg += pps
+@@ -1212,20 +1163,14 @@
+ #
+ # Add OVS OpenFlow rules
+ #
+-def create_ovs_bidirectional_of_rules(number_of_flows, src_port,
+-                                      dst_port, **kwargs):
++def create_ovs_bidirectional_of_rules(number_of_flows, src_port, dst_port, **kwargs):
+ 
+     if config.flow_type == 'L2':
+-        create_ovs_bidirectional_l2_of_rules(number_of_flows, src_port,
+-                                             dst_port, **kwargs)
+-    elif config.flow_type == 'L2-NORMAL':
+-        create_ovs_of_normal_rule(**kwargs)
++        create_ovs_bidirectional_l2_of_rules(number_of_flows, src_port, dst_port, **kwargs)
+     elif config.flow_type == 'L3':
+-        create_ovs_bidirectional_l3_of_rules(number_of_flows, src_port,
+-                                             dst_port, **kwargs)
++        create_ovs_bidirectional_l3_of_rules(number_of_flows, src_port, dst_port, **kwargs)
+     elif config.flow_type == 'L4-UDP':
+-        create_ovs_bidirectional_l4_of_rules(number_of_flows, src_port,
+-                                             dst_port, **kwargs)
++        create_ovs_bidirectional_l4_of_rules(number_of_flows, src_port, dst_port, **kwargs)
+     else:
+         raise ValueError("No support for this protocol!!")
+ 
+@@ -1238,7 +1183,7 @@
+     lprint("  * Clear all OpenFlow/Datapath rules on bridge \"{}\"...".
+            format(config.bridge_name))
+ 
+-    dut_shell.dut_exec('sh -c "ovs-ofctl del-flows {0}"'.
++    dut_shell.dut_exec('sh -c "ovs-ofctl del-flows {0}"'.\
+                        format(config.bridge_name),
+                        die_on_error=True)
+ 
+@@ -1357,39 +1302,6 @@
+ 
+ 
+ #
+-# Add OVS OpenFlow NORMAL rule to bridge
+-#
+-def create_ovs_of_normal_rule(**kwargs):
+-    clear_rules = kwargs.pop("clear_rules", True)
+-
+-    if clear_rules:
+-        lprint("  * Clear all OpenFlow/Datapath rules on bridge \"{}\"...".
+-               format(config.bridge_name))
+-        flush_ovs_flows()
+-
+-        cmd = "ovs-appctl fdb/flush {}".format(config.bridge_name)
+-        dut_shell.dut_exec('', raw_cmd=['sh', '-c', cmd], die_on_error=True)
+-
+-    lprint("  * Create OpenFlow NORMAL rules...")
+-
+-    cmd = "ovs-ofctl add-flow {0} action=NORMAL". \
+-          format(config.bridge_name)
+-    dut_shell.dut_exec('', raw_cmd=['sh', '-c', cmd], die_on_error=True)
+-
+-    lprint("  * Verify that OpenFlow NORMAL flow exists...")
+-
+-    result = dut_shell.dut_exec('sh -c "ovs-ofctl dump-flows {0} | '
+-                                'grep -v \'NXST_FLOW reply\'"'.
+-                                format(config.bridge_name),
+-                                die_on_error=True)
+-
+-    if result.output.count('\n') != 1:
+-        lprint("ERROR: Only 1 flows should exsits, but there are {0}!".
+-               format(result.output.count('\n')))
+-        sys.exit(-1)
+-
+-
+-#
+ # Add OVS L3 OpenFlow rules
+ #
+ def create_ovs_l3_of_rules(number_of_flows, src_port, dst_port, **kwargs):
+@@ -1439,7 +1351,6 @@
+                    format(number_of_flows, int(result.stdout_output)))
+             sys.exit(-1)
+ 
+-
+ #
+ # Add OVS Bidirectional L3 OpenFlow rules
+ #
+@@ -1574,7 +1485,6 @@
+                    format(number_of_flows, int(result.stdout_output)))
+             sys.exit(-1)
+ 
+-
+ #
+ # Add OVS Bidirectional L4 OpenFlow rules
+ #
+@@ -1630,27 +1540,18 @@
+                    format(config.bridge_name, config.virtual_interface)
+ 
+     if dpdk:
+-        command += "-- set Interface {0} type=dpdk " . \
+-                   format(config.physical_interface)
+-
+-        if config.virtual_interface:
+-            command += "-- set Interface {0} type=dpdkvhostuser ". \
+-                       format(config.virtual_interface)
++        command += "-- set Interface {0} type=dpdk " \
++                   "-- set Interface {1} type=dpdkvhostuser ". \
++                   format(config.physical_interface, config.virtual_interface)
+ 
+         if config.pmd_rxq_affinity is not None:
+-            command += "-- set Interface {0} options:n_rxq={1} " \
+-                       "other_config:pmd-rxq-affinity={2} " . \
+-                       format(config.physical_interface,
++            command += "-- set Interface {0} options:n_rxq={2} " \
++                       "other_config:pmd-rxq-affinity={3} " \
++                       "-- set Interface {1} options:n_rxq={2} " \
++                       "other_config:pmd-rxq-affinity={3} ". \
++                       format(config.physical_interface, config.virtual_interface,
+                               config.pmd_rxq_affinity.count(':'), config.pmd_rxq_affinity)
+ 
+-            if config.virtual_interface:
+-                command += "-- set Interface {0} options:n_rxq={1} " \
+-                           "other_config:pmd-rxq-affinity={2} ". \
+-                           format(config.virtual_interface,
+-                                  config.pmd_rxq_affinity.count(':'),
+-                                  config.pmd_rxq_affinity)
+-
+-
+     #
+     # Add second virtual ports if vv test is enabled
+     #
+@@ -1660,7 +1561,7 @@
+                          config.second_virtual_interface)
+ 
+         if dpdk:
+-            command += "-- set Interface {0} type=dpdkvhostuser ". \
++            command += "-- set Interface {} type=dpdkvhostuser ". \
+                         format(config.second_virtual_interface)
+ 
+             if config.pmd_rxq_affinity is not None:
+@@ -1681,12 +1582,10 @@
+             command += "-- set Interface {0} type=dpdk ". \
+                   format(config.second_physical_interface)
+ 
+-            if config.pmd_rxq_affinity is not None:
+-                command += "-- set Interface {0} options:n_rxq={1} " \
+-                           "other_config:pmd-rxq-affinity={2} ". \
+-                           format(config.second_physical_interface,
+-                                  config.pmd_rxq_affinity.count(':'),
+-                                  config.pmd_rxq_affinity)
++            command += "-- set Interface {0} options:n_rxq={1} " \
++                       "other_config:pmd-rxq-affinity={2} ". \
++                       format(config.second_physical_interface,
++                              config.pmd_rxq_affinity.count(':'), config.pmd_rxq_affinity)
+ 
+     #
+     # If we are running DPDK and it's 2.7 or higher we need to specify the PCI
+@@ -1705,11 +1604,6 @@
+                    format(config.physical_interface,
+                           config.physical_interface_pci)
+ 
+-        if config.second_physical_interface:
+-            command += "-- set Interface {0} options:dpdk-devargs={1} " . \
+-                       format(config.second_physical_interface,
+-                              config.second_physical_interface_pci)
+-
+     #
+     # Configure all the above!
+     #
+@@ -1722,8 +1616,8 @@
+     # If this is DPDK, you might need to start the VM for thinks to start
+     # working. So we pause here, asking for restart of the VM.
+     #
+-    if dpdk and config.virtual_interface:
+-        print("!!! Finished configuring the OVS bridge, please restart the Virtual Machine !!!")
++    if dpdk:
++        print "!!! Finished configuring the OVS bridge, please restart the Virtual Machine !!!"
+         raw_input("Press Enter to continue...")
+ 
+ 
+@@ -1813,7 +1707,7 @@
+     # working. So we pause here, asking for restart of the VM.
+     #
+     if dpdk:
+-        print("!!! Finished configuring the OVS bridge, please restart the Virtual Machine !!!")
++        print "!!! Finished configuring the OVS bridge, please restart the Virtual Machine !!!"
+         raw_input("Press Enter to continue...")
+ 
+ 
+@@ -1897,9 +1791,9 @@
+                   port_stats.output)
+     if m:
+         if '?' in m.group(1):
+-            tx = int(0)
++            tx = 0
+         else:
+-            tx = int(m.group(1))
++            tx = m.group(1)
+     else:
+         lprint("ERROR: Can't get transmitted packet stats for OpenFlow "
+                "port {0} on brige \"{1}\"".
+@@ -1910,9 +1804,9 @@
+                   port_stats.output)
+     if m:
+         if '?' in m.group(1):
+-            tx_drop = int(0)
++            tx_drop = 0
+         else:
+-            tx_drop = int(m.group(1))
++            tx_drop = m.group(1)
+     else:
+         lprint("ERROR: Can't get transmitted drop stats for OpenFlow "
+                "port {0} on brige \"{1}\"".
+@@ -1923,9 +1817,9 @@
+                   port_stats.output)
+     if m:
+         if '?' in m.group(1):
+-            rx = int(0)
++            rx = 0
+         else:
+-            rx = int(m.group(1))
++            rx = m.group(1)
+     else:
+         lprint("ERROR: Can't get received packet stats for OpenFlow "
+                "port {0} on brige \"{1}\"".
+@@ -1936,25 +1830,25 @@
+                   port_stats.output)
+     if m:
+         if '?' in m.group(1):
+-            rx_drop = int(0)
++            rx_drop = 0
+         else:
+-            rx_drop = int(m.group(1))
++            rx_drop = m.group(1)
+     else:
+         lprint("ERROR: Can't get received drop stats for OpenFlow port {0} on brige \"{1}\""
+                .format(of_port, config.bridge_name))
+         sys.exit(-1)
+ 
+     slogger.debug("OF port {0} stats: tx = {1}, tx_drop = {2}, rx = {3}, tx_drop = {3}".
+-                  format(of_port, tx, tx_drop, rx, rx_drop))
++                  format(of_port, long(tx), long(tx_drop), long(rx), long(rx_drop)))
+ 
+-    return tx, tx_drop, rx, rx_drop
++    return long(tx), long(tx_drop), long(rx), long(rx_drop)
+ 
+ 
+ #
+ # Convert a MAC address string to an integer
+ #
+ def mac_2_int(mac_str):
+-    return int(mac_str.replace(":", ""), 16)
++    return int(mac_str.translate(None, ":"), 16)
+ 
+ 
+ #
+@@ -2146,6 +2040,7 @@
+     slogger.info("create_multiple_graph[{}], x = {} : y = {}".
+                  format(title, x, y))
+ 
++
+     if cpu_util is None:
+         fig, pps = plt.subplots()
+         pps_plot = pps
+@@ -2180,7 +2075,7 @@
+     pps_plot.grid(b=True, which='minor', color='k', linestyle=':', alpha=0.2)
+     pps_plot.minorticks_on()
+ 
+-    for y_run in natsorted(list(y.keys())):
++    for y_run in natsorted(y.keys()):
+         pps_plot.plot(x, y[y_run], 'o-', label="{}".format(y_run))
+ 
+     #
+@@ -2211,11 +2106,11 @@
+         bar_width = 0.11
+         cpu_plot.set_title("Open vSwitch CPU utilization")
+ 
+-        ovs_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                     [[] for i in range(len(cpu_util))])))
++        ovs_y_values = dict(zip(cpu_util.keys(),
++                                [[] for i in xrange(len(cpu_util))]))
+ 
+         for i in range(0, len(x)):
+-            for key in list(cpu_util.keys()):
++            for key in cpu_util.keys():
+                 ovs_y_values[key].append(cpu_util[key][i]['ovs_cpu'])
+ 
+         if len(cpu_util) % 2 != 0:
+@@ -2223,7 +2118,7 @@
+         else:
+             align = 'edge'
+ 
+-        for i, key in enumerate(natsorted(list(cpu_util.keys()))):
++        for i, key in enumerate(natsorted(cpu_util.keys())):
+             colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+             x_pos = (x_cpu - (len(cpu_util) / 2 * bar_width)) + (i * bar_width)
+             cpu_plot.bar(x_pos, ovs_y_values[key], bar_width, align=align,
+@@ -2244,26 +2139,26 @@
+         #
+         sys_plot.set_title("Total System CPU utilization")
+ 
+-        usr_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                     [[] for i in range(len(cpu_util))])))
+-        nice_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                      [[] for i in range(len(cpu_util))])))
+-        sys_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                     [[] for i in range(len(cpu_util))])))
+-        iowait_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                        [[] for i in range(len(cpu_util))])))
+-        irq_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                     [[] for i in range(len(cpu_util))])))
+-        soft_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                      [[] for i in range(len(cpu_util))])))
+-        steal_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                       [[] for i in range(len(cpu_util))])))
+-        guest_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                       [[] for i in range(len(cpu_util))])))
+-        gnice_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                       [[] for i in range(len(cpu_util))])))
+-        idle_y_values = dict(list(zip(list(cpu_util.keys()),
+-                                      [[] for i in range(len(cpu_util))])))
++        usr_y_values = dict(zip(cpu_util.keys(),
++                                [[] for i in xrange(len(cpu_util))]))
++        nice_y_values = dict(zip(cpu_util.keys(),
++                                 [[] for i in xrange(len(cpu_util))]))
++        sys_y_values = dict(zip(cpu_util.keys(),
++                                [[] for i in xrange(len(cpu_util))]))
++        iowait_y_values = dict(zip(cpu_util.keys(),
++                                   [[] for i in xrange(len(cpu_util))]))
++        irq_y_values = dict(zip(cpu_util.keys(),
++                                [[] for i in xrange(len(cpu_util))]))
++        soft_y_values = dict(zip(cpu_util.keys(),
++                                 [[] for i in xrange(len(cpu_util))]))
++        steal_y_values = dict(zip(cpu_util.keys(),
++                                  [[] for i in xrange(len(cpu_util))]))
++        guest_y_values = dict(zip(cpu_util.keys(),
++                                  [[] for i in xrange(len(cpu_util))]))
++        gnice_y_values = dict(zip(cpu_util.keys(),
++                                  [[] for i in xrange(len(cpu_util))]))
++        idle_y_values = dict(zip(cpu_util.keys(),
++                                 [[] for i in xrange(len(cpu_util))]))
+ 
+         y_cpu_values = [usr_y_values, nice_y_values, sys_y_values,
+                         iowait_y_values, irq_y_values, soft_y_values,
+@@ -2277,7 +2172,7 @@
+                         '#98df8a', '#d62728', '#ff9896', '#9467bd', '#c5b0d5']
+ 
+         for i in range(0, len(x)):
+-            for key in list(cpu_util.keys()):
++            for key in cpu_util.keys():
+                 for j, y_cpu_value in enumerate(y_cpu_values):
+                     y_cpu_value[key].append(cpu_util[key][i][y_cpu_keys[j]])
+ 
+@@ -2286,7 +2181,7 @@
+         else:
+             align = 'edge'
+ 
+-        for i, key in enumerate(natsorted(list(cpu_util.keys()))):
++        for i, key in enumerate(natsorted(cpu_util.keys())):
+             x_pos = (x_cpu - (len(cpu_util) / 2 * bar_width)) + (i * bar_width)
+ 
+             bottom = [0] * len(x)
+@@ -2384,7 +2279,6 @@
+ 
+     return util
+ 
+-
+ #
+ # Calculate max packets per second base on packet size and wire speed
+ #
+@@ -2402,8 +2296,6 @@
+ 
+     if config.flow_type == 'L2':
+         flow_type = ", L2 flows"
+-    elif config.flow_type == 'L2-NORMAL':
+-        flow_type = ", L2 flows[NORMAL]"
+     elif config.flow_type == 'L3':
+         flow_type = ", L3 flows"
+     elif config.flow_type == 'L4-UDP':
+@@ -2481,11 +2373,10 @@
+ # is enabled else we end up with the same text on the console twice.
+ #
+ def lprint(msg):
+-    print (msg)
++    print msg
+     if config.logging is not None:
+         slogger.info(msg)
+ 
+-
+ #
+ # Start Perf recording on DUT
+ #
+@@ -2615,9 +2506,9 @@
+                                 die_on_error=True)
+ 
+     m = re.search('.*([0-9]+.[0-9]+.[0-9]+).*',
+-                  str(result.output))
++                  result.output)
+     if m:
+-        return str(m.group(1))
++        return m.group(1)
+ 
+     lprint("ERROR: Can't figure out ovs-vswitchd's version!")
+     sys.exit(-1)
+@@ -2630,16 +2521,16 @@
+ 
+     cmd = r"sshpass -p {2} ssh -o UserKnownHostsFile=/dev/null " \
+           r"-o StrictHostKeyChecking=no -n {1}@{0} " \
+-          r"testpmd -v". \
++          r"'testpmd -v | grep \"EAL: RTE Version\"'". \
+           format(vm, config.dut_vm_user, config.dut_vm_password)
+ 
+     result = dut_shell.dut_exec('', raw_cmd=['sh', '-c', cmd],
+                                 die_on_error=False)
+ 
+-    m = re.search('DPDK ([0-9]+\.[0-9]+\.[0-9]+)',
++    m = re.search('.*DPDK ([0-9]+\.[0-9]+\.[0-9]+).*',
+                   result.output)
+     if m:
+-        return str(m.group(1))
++        return m.group(1)
+ 
+     lprint("ERROR: Can't figure out VMs DPDK version!")
+     sys.exit(-1)
+@@ -2686,27 +2577,26 @@
+ #
+ # Flow type definitions
+ #
+-flow_types = ['L2', 'L2-NORMAL', 'L3', 'L4-UDP']
++flow_types = ['L2', 'L3', 'L4-UDP']
+ 
+ 
+ def get_flow_type_short():
+-    labels = dict(list(zip(flow_types,
+-                           ['L2', 'L2-NORMAL', 'L3', 'L4-UDP'])))
++    labels = dict(zip(flow_types,
++                      ['L2', 'L3', 'L4-UDP']))
+     return labels[config.flow_type]
+ 
+ 
+ def get_flow_type_name():
+-    labels = dict(list(zip(flow_types,
+-                           ['l2', 'l2_NORMAL', 'l3', 'l4_udp'])))
++    labels = dict(zip(flow_types,
++                      ['l2', 'l3', 'l4_udp']))
+     return labels[config.flow_type]
+ 
+ 
+ def get_traffic_generator_flow():
+-    flow_type = dict(list(zip(flow_types,
+-                              [TrafficFlowType.l2_mac,
+-                               TrafficFlowType.l2_mac,  # L2_NORMAL=L2 traffic
+-                               TrafficFlowType.l3_ipv4,
+-                               TrafficFlowType.l4_udp])))
++    flow_type = dict(zip(flow_types,
++                         [TrafficFlowType.l2_mac,
++                          TrafficFlowType.l3_ipv4,
++                          TrafficFlowType.l4_udp]))
+     return flow_type[config.flow_type]
+ 
+ 
+@@ -2717,9 +2607,9 @@
+ 
+ 
+ def get_traffic_generator_type():
+-    traffic_generator_type = dict(list(zip(traffic_tester_types,
+-                                           [TrafficGeneratorType.xena,
+-                                            TrafficGeneratorType.trex])))
++    traffic_generator_type = dict(zip(traffic_tester_types,
++                                      [TrafficGeneratorType.xena,
++                                       TrafficGeneratorType.trex]))
+ 
+     return traffic_generator_type[config.tester_type]
+ 
+@@ -2782,12 +2672,6 @@
+     parser.add_argument("--dut-vm-nic-queues", metavar="QUEUES",
+                         help="Number of VM nic queues (and cores) to allocate, default 1",
+                         type=int, default=1)
+-    parser.add_argument("--dut-vm-nic-rxd", metavar="DESCRIPTORS",
+-                        help="Number of VM nic receive descriptors, default 4096",
+-                        type=int, default=4096)
+-    parser.add_argument("--dut-vm-nic-txd", metavar="DESCRIPTORS",
+-                        help="Number of VM nic transmit descriptors, default 1024",
+-                        type=int, default=1024)
+     # Removed VV test for now, as it needs non-upstream trafgen tool
+     #parser.add_argument("--dut-second-vm-address", metavar="ADDRESS",
+     #                    help="IP address of second VM running on OpenVSwitch DUT", type=str,
+@@ -2849,11 +2733,6 @@
+                         default=DEFAULT_STREAM_LIST)
+     parser.add_argument("--warm-up",
+                         help="Do flow warm-up round before tests", action="store_true")
+-    parser.add_argument("--warm-up-timeout", metavar="SECONDS",
+-                        help="Warm up timeout", type=int,
+-                        default=DEFAULT_WARM_UP_TIMEOUT)
+-    parser.add_argument("--warm-up-no-fail",
+-                        help="Continue running the test even if warm up times out", action="store_true")
+     parser.add_argument("--no-cool-down",
+                         help="Do not wait for datapath flows to be cleared", action="store_true")
+     parser.add_argument("-v", "--virtual-interface", metavar="DEVICE",
+@@ -2938,13 +2817,13 @@
+         lprint("ERROR: You must supply a Source Base MAC Address")
+         sys.exit(-1)
+ 
+-    if config.flow_type == 'L2' or config.flow_type == 'L2-NORMAL':
+-        if (int(config.src_mac_address.replace(":", ""), 16) & 0xffffff) \
++    if config.flow_type == 'L2':
++        if (int(config.src_mac_address.translate(None, ":"), 16) & 0xffffff) \
+            != 0:
+             lprint("ERROR: For L2 tests the Source Base MAC address must "
+                    "be xx:xx:xx:00:00:00")
+             sys.exit(-1)
+-        if (int(config.dst_mac_address.replace(":", ""), 16) & 0xffffff) \
++        if (int(config.dst_mac_address.translate(None, ":"), 16) & 0xffffff) \
+            != 0:
+             lprint("ERROR: For L2 tests the Destination Base MAC address must "
+                    "be xx:xx:xx:00:00:00")
+@@ -3058,18 +2937,6 @@
+     if config.warm_up and (not config.skip_vv_test or config.run_vxlan_test):
+         lprint("WARNING: Warm-up only works for P2P, P2V, and P2V2P tests!")
+ 
+-    if config.flow_type == 'L2-NORMAL':
+-        if not config.skip_vv_test or not config.skip_pv_test or \
+-           config.run_pp_test:
+-            lprint("ERROR: The L2-NORMAL flow type is only tested/supported "
+-                   "with the PVP test!")
+-            sys.exit(-1)
+-
+-        if not config.mac_swap:
+-            lprint("ERROR: The L2-NORMAL flow type requires the --mac-swap "
+-                   "option!")
+-            sys.exit(-1)
+-
+     #
+     # Dump settings if global debug is enabled
+     #
+@@ -3104,8 +2971,6 @@
+     slogger.debug("  %-23.23s: %s", 'OVS DUT VM2 PCI Address', config.dut_second_vm_nic_pci)
+     slogger.debug("  %-23.23s: %s", 'OVS VM Login', config.dut_vm_user)
+     slogger.debug("  %-23.23s: %s", 'OVS VM NIC queues', config.dut_vm_nic_queues)
+-    slogger.debug("  %-23.23s: %s", 'OVS VM NIC rxd', config.dut_vm_nic_rxd)
+-    slogger.debug("  %-23.23s: %s", 'OVS VM NIC txd', config.dut_vm_nic_txd)
+     slogger.debug("  %-23.23s: %s", 'Physical Interface', config.physical_interface)
+     slogger.debug("  %-23.23s: %u Gbit/s", 'Physical Int. Speed', config.physical_speed)
+     slogger.debug("  %-23.23s: %s", 'Virtual Interface', config.virtual_interface)
+@@ -3250,8 +3115,6 @@
+ 
+     if config.flow_type == 'L2':
+         csv_file = "test_results_l2.csv"
+-    elif config.flow_type == 'L2-NORMAL':
+-        csv_file = "test_results_l2_normal.csv"
+     elif config.flow_type == 'L3':
+         csv_file = "test_results_l3.csv"
+     elif config.flow_type == 'L4-UDP':
+@@ -3259,7 +3122,7 @@
+     else:
+         raise ValueError("No support for this protocol!!")
+ 
+-    with open(csv_file, 'w') as csvfile:
++    with open(csv_file, 'wb') as csvfile:
+         csv_handle = csv.writer(csvfile, dialect='excel')
+ 
+         csv_handle.writerow(["Physical port, \"{}\", speed {} Gbit/s".
